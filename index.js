@@ -2,58 +2,150 @@ import "dotenv/config";
 import express from "express";
 import multer from "multer";
 import fs from "fs";
+import cors from "cors";  // Tambah import cors
 import { GoogleGenerativeAI } from "@google/generative-ai";
-
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
-app.use(express.json());
 
+// Middleware
+app.use(cors({
+    origin: ['http://localhost:8080', 'http://127.0.0.1:8080', 'file://', '*'],
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type']
+}));
+app.use(express.json());
 
 const ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const GEMINI_MODEL = "gemini-2.5-flash";
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-console.log(`Server berjalan di port ${PORT}`);
-});
 
 // Fungsi Helper
 function extractText(resp) {
-try {
-    const text =
-    resp?.response?.candidates?.[0]?.content?.parts?.[0]?.text ??
-    resp?.candidates?.[0]?.content?.parts?.[0]?.text ??
-    resp?.response?.candidates?.[0]?.content?.text;
+    try {
+        const text =
+        resp?.response?.candidates?.[0]?.content?.parts?.[0]?.text ??
+        resp?.candidates?.[0]?.content?.parts?.[0]?.text ??
+        resp?.response?.candidates?.[0]?.content?.text;
 
-    return text ?? JSON.stringify(resp, null, 2);
-} catch (err) {
-    console.error("Error extracting text:", err);
-    return JSON.stringify(resp, null, 2);
+        return text ?? JSON.stringify(resp, null, 2);
+    } catch (err) {
+        console.error("Error extracting text:", err);
+        return JSON.stringify(resp, null, 2);
+    }
 }
-}
+
+// ============= CHATBOT ENDPOINT (BARU) =============
+app.post("/api/chat", async (req, res) => {
+    try {
+        console.log('Received chat request:', req.body);
+        
+        const { messages } = req.body;
+        
+        // Validate input
+        if (!messages || !Array.isArray(messages)) {
+            return res.status(400).json({
+                error: 'Invalid input format. Expected messages array.'
+            });
+        }
+        
+        if (messages.length === 0) {
+            return res.status(400).json({
+                error: 'Messages array cannot be empty.'
+            });
+        }
+        
+        // Format messages for Gemini
+        const formattedMessages = messages.map(msg => ({
+            role: msg.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: msg.content }]
+        }));
+        
+        console.log('Formatted messages:', JSON.stringify(formattedMessages, null, 2));
+        
+        // Get Gemini model
+        const model = ai.getGenerativeModel({ model: GEMINI_MODEL });
+        
+        // Generate response
+        const result = await model.generateContent({
+            contents: formattedMessages,
+            generationConfig: {
+                temperature: 0.7,
+                topP: 0.9,
+                topK: 40,
+                maxOutputTokens: 1024,
+            },
+        });
+        
+        const responseText = extractText(result);
+        
+        console.log('Gemini response:', responseText);
+        
+        res.json({ 
+            result: responseText,
+            status: 'success',
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Chat endpoint error:', error);
+        
+        // Handle specific Gemini API errors
+        if (error.message?.includes('API_KEY')) {
+            return res.status(401).json({
+                error: 'Invalid API key or API key not configured',
+                message: 'Please check your Gemini API key configuration'
+            });
+        }
+        
+        if (error.message?.includes('quota')) {
+            return res.status(429).json({
+                error: 'API quota exceeded',
+                message: 'Please try again later'
+            });
+        }
+        
+        res.status(500).json({
+            error: 'Failed to generate response',
+            message: error.message || 'Internal server error',
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        message: 'Gemini AI Chatbot API is running',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// ============= EXISTING ENDPOINTS =============
 
 // 1. Endpoint untuk mengirimkan teks
 app.post("/generate-text", async (req, res) => {
-try {
-    const { prompt } = req.body;
+    try {
+        const { prompt } = req.body;
 
-    if (!prompt) {
-    return res.status(400).json({ error: "Tulis sebuah prompt!" });
+        if (!prompt) {
+        return res.status(400).json({ error: "Tulis sebuah prompt!" });
+        }
+
+        const model = ai.getGenerativeModel({ model: GEMINI_MODEL });
+
+        const result = await model.generateContent({
+        contents: [{ parts: [{ text: prompt }] }],
+        });
+
+        const response = await result.response;
+        res.json({ result: extractText(response) });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
     }
-
-    const model = ai.getGenerativeModel({ model: GEMINI_MODEL });
-
-    const result = await model.generateContent({
-    contents: [{ parts: [{ text: prompt }] }],
-    });
-
-    const response = await result.response;
-    res.json({ result: extractText(response) });
-} catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-}
 });
 
 // 2. Endpoint untuk mengirimkan gambar
@@ -163,5 +255,21 @@ app.post("/generate-from-audio", upload.single("audio"), async (req, res) => {
         if (filePath) {
             fs.unlinkSync(filePath);
         }
+    }
+});
+
+// Start server
+app.listen(PORT, () => {
+    console.log(`🚀 Gemini AI Server running on http://localhost:${PORT}`);
+    console.log(`📱 Chat API: http://localhost:${PORT}/api/chat`);
+    console.log(`🔍 Health check: http://localhost:${PORT}/api/health`);
+    
+    // Check if API key is configured
+    if (!process.env.GEMINI_API_KEY) {
+        console.warn('⚠️  WARNING: GEMINI_API_KEY not found in environment variables!');
+        console.log('Please create a .env file with your Gemini API key:');
+        console.log('GEMINI_API_KEY=your_api_key_here');
+    } else {
+        console.log('✅ Gemini API key configured');
     }
 });
